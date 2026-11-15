@@ -40,9 +40,9 @@ export enum GestureState {
 
 export interface GestureEventMap {
   [key: string]: unknown;
-  rotate: { dx: number; dy: number };
+  rotate: { dx: number; dy: number; x?: number; y?: number };
   zoom: { scale: number };
-  pan: { dx: number; dy: number };
+  pan: { dx: number; dy: number; x?: number; y?: number };
   pointer: { x: number; y: number };
   select: { x: number; y: number };
   sectionStart: undefined;

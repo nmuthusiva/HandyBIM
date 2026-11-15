@@ -4,15 +4,15 @@ import { GestureState } from './types';
 import type { GestureEventMap, HandControlOptions, Landmark, Point2D } from './types';
 import { angleDelta, applyDeadZone, distance2D, handAngle, isFingerExtended, smooth } from './mathUtils';
 
-const MEDIAPIPE_VERSION = '0.10.14';
+const MEDIAPIPE_VERSION = '1.0.1';
 const DEFAULT_WASM_BASE_PATH = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VERSION}/wasm`;
 const DEFAULT_MODEL_ASSET_PATH =
   'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 
 // Pinch distance thresholds (normalized landmark units), with hysteresis so
 // the signal doesn't chatter right at the boundary.
-const PINCH_START = 0.045;
-const PINCH_END = 0.065;
+const PINCH_START = 0.055;
+const PINCH_END = 0.075;
 
 // Frame-based gesture confirmation, per spec: most gestures need 3
 // consecutive frames to activate and tolerate 3 missing frames before
@@ -115,11 +115,20 @@ export class HandControl extends TypedEventEmitter<GestureEventMap> {
   async start(): Promise<void> {
     if (this.running) return;
     const vision = await FilesetResolver.forVisionTasks(this.wasmBasePath);
-    this.handLandmarker = await HandLandmarker.createFromOptions(vision, {
-      baseOptions: { modelAssetPath: this.modelAssetPath, delegate: 'GPU' },
-      numHands: this.maxHands,
-      runningMode: 'VIDEO',
-    });
+    try {
+      this.handLandmarker = await HandLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: this.modelAssetPath, delegate: 'GPU' },
+        numHands: this.maxHands,
+        runningMode: 'VIDEO',
+      });
+    } catch (gpuError) {
+      console.warn('GPU delegate failed for HandLandmarker, falling back to CPU:', gpuError);
+      this.handLandmarker = await HandLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: this.modelAssetPath, delegate: 'CPU' },
+        numHands: this.maxHands,
+        runningMode: 'VIDEO',
+      });
+    }
     this.running = true;
     this.lastVideoTime = -1;
     this.loop();
@@ -171,7 +180,6 @@ export class HandControl extends TypedEventEmitter<GestureEventMap> {
       const wasPinching = this.pinchActive[i];
       if (!wasPinching && hand.pinchDistance < PINCH_START) {
         this.pinchActive[i] = true;
-        if (i === 0) this.emit('select', { x: this.lastPointerPos.x, y: this.lastPointerPos.y });
       } else if (wasPinching && hand.pinchDistance > PINCH_END) {
         this.pinchActive[i] = false;
       }
@@ -207,10 +215,18 @@ export class HandControl extends TypedEventEmitter<GestureEventMap> {
     });
     this.smoothedLandmarks[handIndex] = smoothed;
 
+    // Project slightly past landmark 8 along the (7 -> 8) vector to land right on the physical fingertip
+    const tipDirX = smoothed[8].x - smoothed[7].x;
+    const tipDirY = smoothed[8].y - smoothed[7].y;
+    const physicalTip: Point2D = {
+      x: smoothed[8].x + tipDirX * 0.35,
+      y: smoothed[8].y + tipDirY * 0.35,
+    };
+
     return {
       landmarks: smoothed,
       center: smoothed[9], // middle-finger MCP
-      indexTip: smoothed[8],
+      indexTip: physicalTip,
       pinchDistance: distance2D(smoothed[4], smoothed[8]),
       extended: {
         index: isFingerExtended(smoothed, 8, 6),
@@ -309,7 +325,10 @@ export class HandControl extends TypedEventEmitter<GestureEventMap> {
         this.drivePan(hand0);
         break;
       case GestureState.POINTING:
-        this.emit('pointer', { x: hand0.indexTip.x, y: hand0.indexTip.y });
+      case GestureState.HAND_VISIBLE:
+        if (hand0.extended.index) {
+          this.emit('pointer', { x: hand0.indexTip.x, y: hand0.indexTip.y });
+        }
         break;
       default:
         break;
@@ -358,7 +377,7 @@ export class HandControl extends TypedEventEmitter<GestureEventMap> {
 
     // First real movement while pinching escalates PINCHING -> ROTATING.
     this.confirmedState = GestureState.ROTATING;
-    this.emit('rotate', { dx, dy });
+    this.emit('rotate', { dx, dy, x: hand0.center.x, y: hand0.center.y });
   }
 
   private drivePan(hand0: HandFrame): void {
@@ -369,6 +388,6 @@ export class HandControl extends TypedEventEmitter<GestureEventMap> {
     const dx = applyDeadZone(hand0.center.x - this.baseline.handCenter.x, DEAD_ZONE);
     const dy = applyDeadZone(hand0.center.y - this.baseline.handCenter.y, DEAD_ZONE);
     this.baseline.handCenter = { ...hand0.center };
-    if (dx !== 0 || dy !== 0) this.emit('pan', { dx, dy });
+    if (dx !== 0 || dy !== 0) this.emit('pan', { dx, dy, x: hand0.center.x, y: hand0.center.y });
   }
 }
